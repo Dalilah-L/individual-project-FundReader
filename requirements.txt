@@ -7,3 +7,6 @@ numpy>=1.24
 
 # 绘图
 matplotlib>=3.7
+
+# 网页版（可选，只在运行 web_app.py 时需要）
+streamlit>=1.30
