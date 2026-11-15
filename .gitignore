@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ----------------------------
+# FundReader project specific
+# ----------------------------
+.env
+.env.local
+cache/
+output/*.png
