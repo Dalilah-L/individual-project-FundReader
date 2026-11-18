@@ -1,0 +1,11 @@
+# Streamlit 全局配置（会随仓库一起部署，不包含任何密钥）
+[server]
+headless = true          # 云端/无浏览器环境直接起服务
+enableStaticServing = false
+
+[browser]
+gatherUsageStats = false # 不上报使用统计
+
+[theme]
+base = "light"
+primaryColor = "#2f6fb3"

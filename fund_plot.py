@@ -2,13 +2,16 @@
 """
 fund_plot.py
 ============
-绘图模块：把历史净值和基金经理任职表现画成图，保存到本地 output/ 目录。
+绘图模块：把历史净值和基金经理任职表现画成图。
 
-两张图：
-1. plot_nav_history()      : 基金历史净值走势 + 回撤曲线
-2. plot_manager_tenure()   : 基金经理上任前后净值对比 + 同类样本平均
+两张图各有“内存版”和“存盘版”：
+1. build_nav_figure()      : 基金历史净值走势 + 回撤曲线，返回 Figure（网页版用）
+   plot_nav_history()      : 同上，并保存到本地 output/ 目录（命令行版用）
+2. build_manager_figure()  : 基金经理上任前后净值对比 + 同类样本平均，返回 Figure
+   plot_manager_tenure()   : 同上，并保存到本地 output/ 目录
 
 所有图都只展示已经发生的历史数据，并在图内印上风险提示。
+网页版通过 st.pyplot 直接渲染 Figure，不依赖本地磁盘路径，云端 Linux 也能用。
 """
 
 from __future__ import annotations
@@ -47,12 +50,19 @@ def setup_chinese_font() -> str:
     返回选中的字体名（找不到时返回空字符串，图里中文可能显示为方框）。
     """
     preferred = [
+        # Windows
         "Microsoft YaHei",
         "SimHei",
         "DengXian",
+        # Linux（Streamlit Cloud 通过 packages.txt 安装 fonts-noto-cjk 后可用）
         "Noto Sans CJK SC",
+        "Noto Sans CJK JP",
+        "Noto Serif CJK SC",
         "Source Han Sans SC",
         "WenQuanYi Micro Hei",
+        "WenQuanYi Zen Hei",
+        "AR PL UMing CN",
+        # macOS
         "PingFang SC",
         "Arial Unicode MS",
     ]
@@ -126,12 +136,13 @@ def _add_disclaimer(fig, extra: str = "") -> None:
 # 图 1：基金历史净值走势
 # ---------------------------------------------------------------------------
 
-def plot_nav_history(result: dict, outdir: Optional[Path] = None) -> Path:
+def build_nav_figure(result: dict):
     """
-    绘制基金历史净值走势图（上方净值，下方回撤），保存为 PNG。
+    构造「历史净值走势 + 回撤」图，返回 matplotlib Figure（不写磁盘）。
 
     参数 result 来自 fund_interpret.analyze_fund()。
-    返回图片路径。
+    网页版直接把这个 Figure 交给 st.pyplot 渲染；
+    命令行版再通过 plot_nav_history() 存成 PNG。
     """
     setup_chinese_font()
 
@@ -142,7 +153,6 @@ def plot_nav_history(result: dict, outdir: Optional[Path] = None) -> Path:
     if nav is None or nav.empty or len(nav) < 2:
         raise PlotError("净值数据太少，画不出走势图。")
 
-    outdir = Path(outdir or OUTPUT_DIR)
     dates = pd.to_datetime(nav["date"])
     values = pd.to_numeric(nav["value"], errors="coerce")
     valid = values.notna()
@@ -261,6 +271,14 @@ def plot_nav_history(result: dict, outdir: Optional[Path] = None) -> Path:
         "最大回撤 = 从历史高点跌到最低点的幅度；年化 = 把整段历史平均摊到每年，二者都不是未来收益承诺。",
     )
 
+    return fig
+
+
+def plot_nav_history(result: dict, outdir: Optional[Path] = None) -> Path:
+    """命令行版用：构造走势图并保存为 PNG，返回文件路径。"""
+    basic = result["basic"]
+    fig = build_nav_figure(result)
+    outdir = Path(outdir or OUTPUT_DIR)
     filename = f"{result['ts_code'].replace('.', '_')}_{_safe_filename(basic['name'])}_净值走势.png"
     return _save_fig(fig, outdir / filename)
 
@@ -269,12 +287,9 @@ def plot_nav_history(result: dict, outdir: Optional[Path] = None) -> Path:
 # 图 2：基金经理上任前后净值对比
 # ---------------------------------------------------------------------------
 
-def plot_manager_tenure(report, outdir: Optional[Path] = None) -> Path:
+def build_manager_figure(report):
     """
-    绘制基金经理上任前后的归一化净值走势：
-    - 蓝线：本基金（以上任日净值 = 1.00 归一化）
-    - 灰虚线：同类样本平均（若有）
-    - 橙色竖线：上任日期；橙色浅色区域：任职区间
+    构造「基金经理上任前后归一化净值对比」图，返回 matplotlib Figure（不写磁盘）。
 
     参数 report 来自 fund_manager_analysis.analyze_manager()。
     """
@@ -288,7 +303,6 @@ def plot_manager_tenure(report, outdir: Optional[Path] = None) -> Path:
     if len(window) < 2:
         raise PlotError("上任前后的净值点太少，画不出对比图。")
 
-    outdir = Path(outdir or OUTPUT_DIR)
     basic = report.basic
     begin = pd.Timestamp(report.primary_begin)
     end = pd.Timestamp(window["date"].max())
@@ -406,6 +420,15 @@ def plot_manager_tenure(report, outdir: Optional[Path] = None) -> Path:
         "基金经理过往历史业绩不代表未来表现，不构成投资建议。",
     )
 
+    return fig
+
+
+def plot_manager_tenure(report, outdir: Optional[Path] = None) -> Path:
+    """命令行版用：构造经理任期对比图并保存为 PNG，返回文件路径。"""
+    basic = report.basic
+    manager_name = report.primary_name
+    fig = build_manager_figure(report)
+    outdir = Path(outdir or OUTPUT_DIR)
     filename = (
         f"{report.ts_code.replace('.', '_')}_{_safe_filename(basic['name'])}"
         f"_{_safe_filename(manager_name)}任期净值对比.png"

@@ -10,3 +10,6 @@ matplotlib>=3.7
 
 # 网页版（可选，只在运行 web_app.py 时需要）
 streamlit>=1.30
+
+# 读取本地 .env（网页版/云端双通道读取密钥）
+python-dotenv>=1.0

@@ -2,7 +2,7 @@
 """
 web_app.py
 ==========
-FundReader 网页版（Streamlit）。
+FundReader 网页版（Streamlit），可直接部署到 Streamlit Community Cloud。
 
 启动方式：
     streamlit run web_app.py
@@ -11,6 +11,11 @@ FundReader 网页版（Streamlit）。
     - 数据获取、指标计算、画图全部复用 fund_fetch / fund_interpret /
       fund_manager_analysis / fund_plot，本文件只负责“把结果摆到网页上”；
     - 本文件不实现任何新的投资指标，也不做任何收益率预测。
+
+密钥读取顺序（get_key）：
+    1. 本地 .env（python-dotenv 载入）与系统环境变量；
+    2. Streamlit Secrets（云端部署时用）；
+    3. 都读不到返回 None，页面给中文提示，不崩溃、不打印 token。
 
 合规底线（与命令行版一致）：
     - 只展示已经发生的历史统计；
@@ -22,10 +27,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 from typing import Optional
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 from fund_fetch import (
     DataFetchError,
@@ -39,14 +47,13 @@ from fund_fetch import (
 from fund_interpret import (
     analyze_fund,
     fmt_date,
-    fmt_money,
     fmt_pct,
     fmt_years,
     fund_type_plain,
     share_class,
 )
 from fund_manager_analysis import ManagerDataMissingError, analyze_manager
-from fund_plot import plot_manager_tenure, plot_nav_history
+from fund_plot import build_manager_figure, build_nav_figure
 
 # ---------------------------------------------------------------------------
 # 页面基础设置（必须是第一个 Streamlit 调用）
@@ -85,40 +92,79 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# 缓存：一次会话内复用 tushare 连接和查询结果，避免刷新页面就重复抓数据
+# 密钥：本地 .env / 环境变量 → Streamlit Secrets
+# ---------------------------------------------------------------------------
+
+# 本地开发时读取项目根目录的 .env（云端没有这个文件，调用是安全的空操作）
+load_dotenv()
+
+# 这些占位值等同于“没配置”，避免用户直接复制模板后误以为配好了
+_PLACEHOLDER_VALUES = {
+    "",
+    "your_token_here",
+    "your_token",
+    "none",
+    "null",
+    "在此粘贴你的token",
+}
+
+
+def get_key(name: str) -> Optional[str]:
+    """
+    统一的密钥读取入口。
+
+    顺序：环境变量（含 .env 载入的） → Streamlit Secrets → None。
+    只在内部比较字符串，绝不把值写进页面或日志。
+    """
+    value = (os.environ.get(name) or "").strip()
+    if value and value.lower() not in _PLACEHOLDER_VALUES:
+        return value
+
+    try:
+        secret = st.secrets.get(name)          # 云端部署时由 Secrets 提供
+    except Exception:
+        secret = None                          # 没有 secrets.toml 时会抛异常，忽略即可
+
+    if secret is not None:
+        text = str(secret).strip()
+        if text and text.lower() not in _PLACEHOLDER_VALUES:
+            return text
+
+    return None
+
+
+TUSHARE_TOKEN = get_key("TUSHARE_TOKEN")
+
+
+# ---------------------------------------------------------------------------
+# 缓存：一次会话内复用 tushare 连接和查询结果
 # ---------------------------------------------------------------------------
 
 @st.cache_resource(show_spinner=False)
 def get_fetcher() -> FundFetcher:
     """整个会话共用一个 FundFetcher（它内部还有一层接口级内存缓存）。"""
-    return FundFetcher()
+    if not TUSHARE_TOKEN:
+        raise TokenError(
+            "没有找到 TUSHARE_TOKEN。\n"
+            "本地：在项目根目录的 .env 里写 TUSHARE_TOKEN=你的token；\n"
+            "云端：在 Streamlit 后台的 Secrets 里配置同名变量。"
+        )
+    return FundFetcher(token=TUSHARE_TOKEN)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_fund(code: str) -> dict:
-    """抓取并计算一只基金的解读数据，同时生成净值图。"""
-    # 分析模块里有给命令行用的 print 进度提示，网页版不需要，这里静音掉
+    """抓取并计算一只基金的解读数据（图表在渲染时用内存里的 Figure 生成）。"""
+    # 分析模块里有给命令行用的进度 print，网页版不需要，这里静音掉
     with contextlib.redirect_stdout(io.StringIO()):
-        result = analyze_fund(get_fetcher(), code)
-        chart = ""
-        try:
-            chart = str(plot_nav_history(result))
-        except Exception:
-            chart = ""  # 画图失败不影响文字解读
-    return {"result": result, "chart": chart}
+        return analyze_fund(get_fetcher(), code)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_manager(code: str, peers: int) -> dict:
-    """抓取并计算基金经理历史业绩，同时生成任期对比图。"""
+    """抓取并计算基金经理历史业绩。"""
     with contextlib.redirect_stdout(io.StringIO()):
-        report = analyze_manager(get_fetcher(), code, peer_limit=int(peers))
-        chart = ""
-        try:
-            chart = str(plot_manager_tenure(report))
-        except Exception:
-            chart = ""
-    return {"report": report, "chart": chart}
+        return analyze_manager(get_fetcher(), code, peer_limit=int(peers))
 
 
 # ---------------------------------------------------------------------------
@@ -147,14 +193,13 @@ def show_error(exc: Exception) -> None:
         st.error(f"**这次没有完成**\n\n{exc}")
     else:
         st.error(f"**程序遇到意外问题**\n\n{exc}")
-        st.caption("如需排查细节，可在启动前设置环境变量 FUNDREADER_DEBUG=1。")
 
 
 def check_code(raw: str) -> Optional[str]:
     """校验基金代码格式，返回清理后的代码；不合法时在页面上提示并返回 None。"""
     code = (raw or "").strip()
     if not code:
-        st.warning("请先在左侧输入基金代码，例如 000001。")
+        st.warning("请先输入基金代码，例如 000001。")
         return None
     try:
         split_fund_code(code)
@@ -172,6 +217,24 @@ def metric_row(items: list) -> None:
             col.metric(label, value, help=help_text)
         else:
             col.metric(label, value)
+
+
+def render_figure(builder, argument, caption: str = "") -> None:
+    """
+    用内存里的 Figure 直接渲染图表（不写本地磁盘，云端 Linux 同样可用）。
+
+    builder 是 fund_plot 里的 build_nav_figure / build_manager_figure。
+    """
+    try:
+        fig = builder(argument)
+    except Exception as exc:
+        st.info(f"这次没能生成图表：{exc} 文字结论不受影响。")
+        return
+
+    st.pyplot(fig, clear_figure=True)
+    plt.close(fig)
+    if caption:
+        st.caption(caption)
 
 
 # ---------------------------------------------------------------------------
@@ -200,17 +263,6 @@ def render_basic(result: dict) -> None:
         f"统计区间：{fmt_date(stats['start_date'])} 至 {fmt_date(stats['end_date'])}，"
         f"共 {fmt_years(stats['days'])}"
     )
-
-
-def render_chart(chart: str, caption: str) -> None:
-    st.subheader("净值走势")
-    if chart:
-        try:
-            st.image(chart, caption=caption)
-        except Exception as exc:
-            st.info(f"图表读取失败（{exc}），但下面的文字结论不受影响。")
-    else:
-        st.info("这次没有生成图表（可能数据点太少），但下面的文字结论仍然有效。")
 
 
 def render_fees(basic: dict) -> None:
@@ -443,15 +495,17 @@ def render_fund_tab() -> None:
         st.info("在上面输入 6 位基金代码，然后点「开始解读这只基金」。")
         return
 
+    if not TUSHARE_TOKEN:
+        st.warning("还没有配置 TUSHARE_TOKEN，暂时无法查询。配置方法见页面顶部说明。")
+        return
+
     with st.spinner(f"正在获取 {code} 的数据并计算…（首次查询需要几秒到几十秒）"):
         try:
-            data = load_fund(code)
+            result = load_fund(code)
         except Exception as exc:
             show_error(exc)
             return
 
-    result = data["result"]
-    chart = data["chart"]
     basic = result["basic"]
     stats = result["stats"]
 
@@ -464,7 +518,12 @@ def render_fund_tab() -> None:
     st.divider()
     render_basic(result)
     st.divider()
-    render_chart(chart, "历史净值走势与回撤（图中数据全部为已经发生的历史）")
+    st.subheader("净值走势")
+    render_figure(
+        build_nav_figure,
+        result,
+        "历史净值走势与回撤（图中数据全部为已经发生的历史）",
+    )
     st.divider()
     render_fees(basic)
     st.divider()
@@ -475,7 +534,6 @@ def render_fund_tab() -> None:
     render_glossary()
     st.divider()
     render_fund_disclaimer(stats)
-    st.caption(f"图表已同时保存到本地：{data['chart']}" if data["chart"] else "")
 
 
 # ---------------------------------------------------------------------------
@@ -494,9 +552,7 @@ def render_manager_header(report) -> None:
         f" ｜ 约 {tenure['days']} 天（{fmt_years(tenure['days'])}）"
     )
     if report.is_fallback:
-        st.warning(
-            "这只基金目前没有查询到在任基金经理，下面的统计对象是公开记录里最后一位经理。"
-        )
+        st.warning("这只基金目前没有查询到在任基金经理，下面的统计对象是公开记录里最后一位经理。")
     if report.primary_edu or report.primary_resume:
         with st.expander("经理简介（来自公开披露）"):
             if report.primary_edu:
@@ -560,8 +616,11 @@ def render_manager_tenure(report) -> None:
         "**大白话总结**：这段任职里，基金整体是"
         + ("上涨的" if tenure["cumulative"] > 0 else "下跌的")
         + f"，累计 {fmt_pct(tenure['cumulative'], 1, signed=True)}；"
-        + (f"但中途最多曾回撤 {fmt_pct(mdd.get('value'), 1)}。" if mdd.get("value") is not None
-           else "中途回撤数据不足，无法判断最难受的幅度。")
+        + (
+            f"但中途最多曾回撤 {fmt_pct(mdd.get('value'), 1)}。"
+            if mdd.get("value") is not None
+            else "中途回撤数据不足，无法判断最难受的幅度。"
+        )
         + " 年化只是把这段历史平均摊到每年，不代表他以后每年都能做出同样成绩。"
     )
 
@@ -682,7 +741,10 @@ def render_peer(report) -> None:
     if fund_mdd is not None and report.peer_mdd_median is not None:
         notes.append(f"样本里有 {report.peer_deeper_count} 只基金任期回撤比它更深。")
 
-    notes.append("注意：这只是一个很小的抽样，不是全市场排名，也不能说明这位经理比谁更厉害；样本换一批、时间段换一段，结果都可能不一样。")
+    notes.append(
+        "注意：这只是一个很小的抽样，不是全市场排名，也不能说明这位经理比谁更厉害；"
+        "样本换一批、时间段换一段，结果都可能不一样。"
+    )
 
     invest_type = str(report.basic.get("invest_type", ""))
     fund_name = str(report.basic.get("name", ""))
@@ -713,15 +775,16 @@ def render_manager_tab(peers: int) -> None:
         st.info("在上面输入 6 位基金代码，然后点「分析这只基金的经理」。")
         return
 
+    if not TUSHARE_TOKEN:
+        st.warning("还没有配置 TUSHARE_TOKEN，暂时无法查询。配置方法见页面顶部说明。")
+        return
+
     with st.spinner(f"正在统计 {code} 的经理任职表现并采集同类样本…（首次通常要 20~60 秒）"):
         try:
-            data = load_manager(code, peers)
+            report = load_manager(code, peers)
         except Exception as exc:
             show_error(exc)
             return
-
-    report = data["report"]
-    chart = data["chart"]
 
     render_manager_header(report)
     st.divider()
@@ -729,15 +792,11 @@ def render_manager_tab(peers: int) -> None:
     st.divider()
 
     st.subheader("任期净值对比")
-    if chart:
-        try:
-            st.image(chart, caption="上任前后净值对比（任职起始日归一为 1，虚线为同类样本平均）")
-        except Exception as exc:
-            st.info(f"图表读取失败（{exc}），文字结论不受影响。")
-    else:
-        st.info("这次没有生成图表（可能净值数据太少），文字结论仍然有效。")
-    if chart:
-        st.caption(f"图表已同时保存到本地：{chart}")
+    render_figure(
+        build_manager_figure,
+        report,
+        "上任前后净值对比（任职起始日归一为 1，虚线为同类样本平均）",
+    )
 
     st.divider()
     render_current_managers(report)
@@ -770,6 +829,22 @@ def render_manager_tab(peers: int) -> None:
 # 侧边栏 + 主页面
 # ---------------------------------------------------------------------------
 
+TOKEN_HELP = """
+**本地运行**：在项目根目录建一个 `.env` 文件，写一行：
+
+```
+TUSHARE_TOKEN=你的token
+```
+
+**云端部署**（Streamlit Community Cloud）：在应用设置的 Secrets 里粘贴：
+
+```toml
+TUSHARE_TOKEN = "你的token"
+```
+
+保存后刷新页面即可。本页只显示“已配置 / 未配置”，不会展示 token 内容。
+"""
+
 with st.sidebar:
     st.markdown("### ⚙️ 查询设置")
     peers = st.slider(
@@ -785,6 +860,15 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    st.markdown("### 🔑 密钥体检")
+    if TUSHARE_TOKEN:
+        st.success("TUSHARE_TOKEN：已配置")
+    else:
+        st.error("TUSHARE_TOKEN：未配置")
+    with st.expander("怎么配置"):
+        st.markdown(TOKEN_HELP)
+
+    st.divider()
     st.markdown("**示例代码**")
     st.markdown(
         "- `000001` 华夏成长（主动混合）\n"
@@ -792,10 +876,7 @@ with st.sidebar:
         "- `002599` C 类份额（看销售服务费）"
     )
     st.divider()
-    st.caption(
-        "数据来源：tushare。所有指标都是对历史数据的统计，"
-        "不预测未来，不构成投资建议。"
-    )
+    st.caption("数据来源：tushare。所有指标都是对历史数据的统计，不预测未来，不构成投资建议。")
 
 st.markdown(
     """
@@ -807,6 +888,13 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if not TUSHARE_TOKEN:
+    st.warning(
+        "**检测到还没有配置 TUSHARE_TOKEN**，暂时无法拉取基金数据。\n\n"
+        "本地：在项目根目录的 `.env` 里写 `TUSHARE_TOKEN=你的token`；"
+        "云端：在 Streamlit Secrets 里配置同名变量。左侧「密钥体检 → 怎么配置」有完整示例。"
+    )
 
 tab_fund, tab_manager = st.tabs(["🧾 基金大白话解读", "👤 基金经理业绩分析"])
 
