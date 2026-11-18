@@ -25,8 +25,10 @@ import pandas as pd
 
 try:
     import tushare as ts
-except ImportError:  # 依赖没装时给出明确提示，而不是直接崩掉
+    _TUSHARE_IMPORT_ERROR = ""
+except ImportError as exc:  # 依赖没装时给出明确提示，而不是直接崩掉
     ts = None
+    _TUSHARE_IMPORT_ERROR = str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -219,8 +221,11 @@ class FundFetcher:
 
     def __init__(self, token: Optional[str] = None):
         if ts is None:
+            detail = f"\n底层报错：{_TUSHARE_IMPORT_ERROR}" if _TUSHARE_IMPORT_ERROR else ""
             raise FundReaderError(
-                "缺少 tushare 库。请先在终端执行：pip install -r requirements.txt"
+                "缺少 tushare 库（或它依赖的某个模块没能导入）。\n"
+                "本地：在项目根目录执行 pip install -r requirements.txt 后重试；\n"
+                "云端（Streamlit Cloud）：打开 Manage app，点 Reboot app 让它重新安装依赖。" + detail
             )
 
         self.token = (token or load_token()).strip()
