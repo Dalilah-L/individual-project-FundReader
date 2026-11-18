@@ -1,3 +1,1 @@
-# Streamlit Community Cloud 部署时自动安装的系统依赖（apt）
-# 中文字体：matplotlib 在云端 Linux 默认没有中文字体，不装会显示成方框
 fonts-noto-cjk

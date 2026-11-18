@@ -1,15 +1,6 @@
-# tushare 数据接口
-tushare>=1.2.89
-
-# 数据处理
-pandas>=2.0
-numpy>=1.24
-
-# 绘图
-matplotlib>=3.7
-
-# 网页版（可选，只在运行 web_app.py 时需要）
-streamlit>=1.30
-
-# 读取本地 .env（网页版/云端双通道读取密钥）
-python-dotenv>=1.0
+streamlit
+pandas
+numpy
+matplotlib
+tushare
+python-dotenv
