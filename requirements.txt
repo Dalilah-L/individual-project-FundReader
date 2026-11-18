@@ -4,3 +4,4 @@ numpy
 matplotlib
 tushare
 python-dotenv
+six
